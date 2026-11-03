@@ -62,6 +62,23 @@ fn local_address_saves_and_edits_without_a_key_but_remote_does_not() {
 }
 
 #[test]
+fn comfyui_profiles_need_a_valid_workflow_next_to_the_settings() {
+    let work = tempfile::tempdir().unwrap();
+    let mut settings = Settings::with_store(work.path().join("ai-providers.json"), "comfy".into(), Arc::new(Vault::default())).unwrap();
+    let dir = settings.workflow_dir().unwrap();
+    assert_eq!(dir, work.path().join("comfyui-workflows"));
+    let profile = preset("comfyui").unwrap();
+    assert!(settings.save("comfyui", profile.clone(), None, false).is_err(), "no workflow file yet");
+    std::fs::create_dir_all(&dir).unwrap();
+    let graph = r#"{"1":{"class_type":"LoadImage","inputs":{"image":"{{image}}"}},"2":{"class_type":"CLIPTextEncode","inputs":{"text":"{{prompt}}"}}}"#;
+    std::fs::write(dir.join(format!("{}.json", profile.model)), graph).unwrap();
+    settings.save("comfyui", profile, None, false).unwrap();
+    assert!(!settings.key_required("comfyui").unwrap());
+    assert!(settings.provider("comfyui").is_ok());
+    assert!(Settings::default().provider("comfyui").is_err(), "headless sessions have no workflow folder");
+}
+
+#[test]
 fn session_key_is_not_persisted_and_model_change_can_keep_same_key() {
     let work = tempfile::tempdir().unwrap();
     let path = work.path().join("settings.json");

@@ -10,8 +10,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::{
     Error,
-    api::{ApiProvider, validate_key},
-    api_config::{PROVIDERS, Profile, preset},
+    api::{ApiProvider, load_workflow, validate_key},
+    api_config::{PROVIDERS, Profile, Protocol, preset},
 };
 
 fn error(message: &str) -> Error {
@@ -172,6 +172,10 @@ impl Settings {
         if let Some(key) = new_key {
             validate_key(key)?;
         }
+        // Report a missing or malformed workflow now rather than at the first edit.
+        if profile.protocol == Protocol::ComfyUi {
+            self.workflow(&profile)?;
+        }
         let old = self.profile(provider)?;
         let account = self.account(provider, &profile);
         // A local address may run without a key; an empty key is never stored.
@@ -242,6 +246,16 @@ impl Settings {
         Ok(!self.profile(provider)?.is_local())
     }
 
+    /// ComfyUI workflows (`<model>.json`, exported with Export (API)) live next to the settings file.
+    pub fn workflow_dir(&self) -> Option<PathBuf> {
+        Some(self.path.as_ref()?.parent()?.join("comfyui-workflows"))
+    }
+
+    fn workflow(&self, profile: &Profile) -> Result<serde_json::Value, Error> {
+        let dir = self.workflow_dir().ok_or_else(|| error("ComfyUI workflows are read from the desktop app's settings folder"))?;
+        load_workflow(&dir, &profile.model)
+    }
+
     pub fn provider(&self, provider: &str) -> Result<ApiProvider, Error> {
         let profile = self.profile(provider)?;
         let key = match self.key(provider, &profile)? {
@@ -249,7 +263,13 @@ impl Settings {
             None if profile.is_local() => String::new(),
             None => return Err(error("Configure an API key for the selected service first")),
         };
-        ApiProvider::new(profile, key)
+        // Read the workflow at edit time, so edits made in ComfyUI apply without saving again.
+        let workflow = (profile.protocol == Protocol::ComfyUi).then(|| self.workflow(&profile)).transpose()?;
+        let api = ApiProvider::new(profile, key)?;
+        Ok(match workflow {
+            Some(workflow) => api.with_workflow(workflow),
+            None => api,
+        })
     }
 
     fn persist(&self) -> Result<(), Error> {

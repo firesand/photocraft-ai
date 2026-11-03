@@ -11,6 +11,8 @@ pub enum Protocol {
     /// OpenAI `POST /v1/images/edits` with a JSON body, also spoken by compatible gateways and
     /// local servers.
     OpenAiImages,
+    /// A ComfyUI server; the model ID names an API-format workflow file.
+    ComfyUi,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -22,10 +24,12 @@ pub struct Profile {
     pub model: String,
 }
 
-pub const PROVIDERS: [&str; 4] = ["gemini", "seedream", "flux", "openai"];
+pub const PROVIDERS: [&str; 5] = ["gemini", "seedream", "flux", "openai", "comfyui"];
 
 pub fn preset(provider: &str) -> Option<Profile> {
     match provider {
+        // ComfyUI and ComfyUI Desktop start at 8188 (Desktop moves up when that port is taken).
+        "comfyui" => Some(Profile { protocol: Protocol::ComfyUi, endpoint: "http://127.0.0.1:8188".into(), model: "photocraft-edit".into() }),
         "openai" => Some(Profile { protocol: Protocol::OpenAiImages, endpoint: "https://api.openai.com/v1/images/edits".into(), model: "gpt-image-2".into() }),
         "flux" => Some(Profile { protocol: Protocol::Flux, endpoint: "https://api.bfl.ai/v1/{model}".into(), model: "flux-2-pro".into() }),
         "gemini" => Some(Profile {

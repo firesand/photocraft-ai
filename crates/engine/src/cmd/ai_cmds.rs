@@ -52,11 +52,9 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
 fn run_api(s: &mut Session, p: &Value) -> Result<Value> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let provider = p
-            .get("provider")
-            .and_then(Value::as_str)
-            .filter(|s| photocraft_gen::api_config::PROVIDERS.contains(s))
-            .ok_or_else(|| EngineError::BadParams { cmd: "edit.ai.api".into(), msg: "Explicitly choose provider gemini, seedream, flux or openai".into() })?;
+        let provider = p.get("provider").and_then(Value::as_str).filter(|s| photocraft_gen::api_config::PROVIDERS.contains(s)).ok_or_else(|| {
+            EngineError::BadParams { cmd: "edit.ai.api".into(), msg: "Explicitly choose provider gemini, seedream, flux, openai or comfyui".into() }
+        })?;
         let prompt = p
             .get("prompt")
             .and_then(Value::as_str)
@@ -93,6 +91,7 @@ pub fn edit_named_provider(s: &mut Session, prompt: String, provider: Arc<dyn Im
         "seedream" => "Seedream",
         "flux" => "FLUX",
         "openai" => "OpenAI-compatible",
+        "comfyui" => "ComfyUI",
         _ => "Codex",
     };
     crate::jobs::run(
@@ -193,7 +192,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "AI Edit via API",
             menu: &[],
             shortcut: None,
-            params: r#"{"prompt":"instruction","provider":"gemini|seedream|flux|openai"} -> {layer,provider}; explicitly selected API may incur charges; no fallback"#,
+            params: r#"{"prompt":"instruction","provider":"gemini|seedream|flux|openai|comfyui"} -> {layer,provider}; explicitly selected API may incur charges; no fallback"#,
             enabled,
             run: run_api,
             journal: true,

@@ -13,8 +13,11 @@ const MAX_IMAGE: usize = 64 * 1024 * 1024;
 const MAX_INPUT: usize = 30 * 1024 * 1024;
 const MAX_RESPONSE: usize = 90 * 1024 * 1024;
 const MAX_PIXELS: u64 = 16_777_216;
+mod comfy;
 mod flux;
 mod rejection;
+
+pub use comfy::load_workflow;
 
 fn error(message: &str) -> Error {
     Error::Provider(message.into())
@@ -71,6 +74,8 @@ pub struct ApiProvider {
     profile: Profile,
     key: String,
     timeout: Duration,
+    /// The API-format graph for ComfyUI; other protocols ignore it.
+    workflow: Option<Value>,
 }
 
 impl ApiProvider {
@@ -80,18 +85,62 @@ impl ApiProvider {
         if !(key.is_empty() && profile.is_local()) {
             validate_key(&key)?;
         }
-        Ok(Self { profile, key, timeout: Duration::from_secs(600) })
+        Ok(Self { profile, key, timeout: Duration::from_secs(600), workflow: None })
     }
 
-    async fn request(&self, body: Value) -> Result<Vec<u8>, Error> {
-        let client = reqwest::Client::builder()
+    pub fn with_workflow(mut self, workflow: Value) -> Self {
+        self.workflow = Some(workflow);
+        self
+    }
+
+    fn client(&self) -> Result<reqwest::Client, Error> {
+        reqwest::Client::builder()
             .timeout(self.timeout)
             .connect_timeout(Duration::from_secs(30))
             .redirect(reqwest::redirect::Policy::none())
             .retry(reqwest::retry::never())
             .user_agent("Photocraft-dev")
             .build()
-            .map_err(|_| error("Could not initialize the image API client"))?;
+            .map_err(|_| error("Could not initialize the image API client"))
+    }
+
+    /// `Authorization: Bearer` for ComfyUI behind an authenticating proxy; none without a key.
+    fn bearer(&self) -> Result<Option<reqwest::header::HeaderValue>, Error> {
+        if self.key.is_empty() {
+            return Ok(None);
+        }
+        let mut auth = reqwest::header::HeaderValue::from_str(&format!("Bearer {}", self.key)).map_err(|_| error("Invalid API key"))?;
+        auth.set_sensitive(true);
+        Ok(Some(auth))
+    }
+
+    fn comfy_edit(&self, png: &[u8], prompt: &str, cancelled: &dyn Fn() -> bool) -> Result<Vec<u8>, Error> {
+        let workflow = self.workflow.as_ref().ok_or_else(|| error("No ComfyUI workflow is loaded; save the ComfyUI settings again"))?;
+        let queued = std::sync::Mutex::new(None);
+        let result = cancellable(
+            async {
+                let client = self.client()?;
+                let session = comfy::Session::new(self, &client, self.bearer()?)?;
+                tokio::time::timeout(self.timeout, session.edit(workflow, png, prompt, &queued)).await.map_err(|_| Error::Timeout)?
+            },
+            cancelled,
+        );
+        // Set only while ComfyUI holds the prompt: a cancel or timeout dropped the edit mid-run.
+        if let Some(id) = queued.lock().unwrap_or_else(std::sync::PoisonError::into_inner).take() {
+            let _ = cancellable(
+                async {
+                    let client = self.client()?;
+                    comfy::Session::new(self, &client, self.bearer()?)?.dequeue(&id).await;
+                    Ok(())
+                },
+                &|| false,
+            );
+        }
+        result
+    }
+
+    async fn request(&self, body: Value) -> Result<Vec<u8>, Error> {
+        let client = self.client()?;
         let bearer = matches!(self.profile.protocol, Protocol::Seedream | Protocol::OpenAiImages);
         let mut auth = reqwest::header::HeaderValue::from_str(&if bearer { format!("Bearer {}", self.key) } else { self.key.clone() })
             .map_err(|_| error("Invalid API key"))?;
@@ -163,8 +212,13 @@ impl ImageProvider for ApiProvider {
             return Err(error("API input PNG exceeds 30 MiB; use a smaller canvas"));
         }
         let (width, height) = png_size(&input).ok_or_else(|| error("API input must be a PNG under 16 MP"))?;
-        let body = request_body(&self.profile, request.prompt, &input, width, height)?;
-        let image = cancellable(self.request(body), cancelled)?;
+        let image = if self.profile.protocol == Protocol::ComfyUi {
+            // The workflow decides the output size; diffusion prompts take the instruction as is.
+            self.comfy_edit(&input, request.prompt, cancelled)?
+        } else {
+            let body = request_body(&self.profile, request.prompt, &input, width, height)?;
+            cancellable(self.request(body), cancelled)?
+        };
         if cancelled() {
             return Err(Error::Cancelled);
         }
@@ -225,12 +279,13 @@ fn request_body(profile: &Profile, prompt: &str, input: &[u8], width: u32, heigh
             json!({"model":profile.model,"prompt":prompt,"images":[{"image_url":format!("data:image/png;base64,{encoded}")}],
                 "size":format!("{w}x{h}"),"output_format":"png","n":1})
         }
+        Protocol::ComfyUi => return Err(error("ComfyUI requires its workflow transport")),
     };
     if let Some(ratio) = standard_aspect(width, height) {
         match profile.protocol {
             Protocol::GeminiInteractions => body["response_format"]["aspect_ratio"] = json!(ratio),
             Protocol::GeminiGenerateContent => body["generationConfig"]["imageConfig"] = json!({"aspectRatio":ratio}),
-            Protocol::Seedream | Protocol::Flux | Protocol::OpenAiImages => {}
+            Protocol::Seedream | Protocol::Flux | Protocol::OpenAiImages | Protocol::ComfyUi => {}
         }
     }
     Ok(body)
@@ -288,6 +343,7 @@ fn parse_result(protocol: Protocol, value: &Value) -> Result<Vec<u8>, Error> {
     }
     let images = match protocol {
         Protocol::Flux => return Err(error("FLUX requires its asynchronous result workflow")),
+        Protocol::ComfyUi => return Err(error("ComfyUI requires its workflow transport")),
         Protocol::Seedream | Protocol::OpenAiImages => data_images(value)?,
         Protocol::GeminiGenerateContent => candidate_images(value)?,
         Protocol::GeminiInteractions => interaction_images(value)?,

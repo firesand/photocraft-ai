@@ -65,7 +65,7 @@ fn all_protocols_send_canvas_prompt_and_exactly_one_request() {
             Protocol::GeminiInteractions => json!({"status":"completed","steps":[{"type":"model_output","content":[{"type":"image","data":data}]}]}),
             Protocol::GeminiGenerateContent => json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"inlineData":{"data":data}}]}}]}),
             Protocol::Seedream | Protocol::OpenAiImages => json!({"data":[{"b64_json":data}]}),
-            Protocol::Flux => Value::Null, // The asynchronous workflow has separate tests.
+            Protocol::Flux | Protocol::ComfyUi => Value::Null, // Their asynchronous workflows have separate tests.
         };
         let (mut endpoint, thread, _) = server(200, response.to_string(), false);
         if protocol == Protocol::GeminiGenerateContent {

@@ -12,6 +12,8 @@ pub struct ApiUi {
     has_key: bool,
     /// False for a saved local address, which may run without a key.
     key_required: bool,
+    /// Where ComfyUI workflow files are read from, when the settings are persistent.
+    workflow_dir: Option<String>,
     persistent: bool,
     remember: bool,
     saved_remember: bool,
@@ -56,6 +58,7 @@ fn apply(app: &mut PhotocraftApp, provider: &str, result: Result<Value, String>,
                 key: String::new(),
                 has_key: value.get("hasKey").and_then(Value::as_bool).unwrap_or(false),
                 key_required: value.get("keyRequired").and_then(Value::as_bool).unwrap_or(true),
+                workflow_dir: value.get("workflowDir").and_then(Value::as_str).map(str::to_owned),
                 persistent: value.get("persistentStorage").and_then(Value::as_bool).unwrap_or(false),
                 remember: value.get("rememberKey").and_then(Value::as_bool).unwrap_or(false),
                 saved_remember: value.get("rememberKey").and_then(Value::as_bool).unwrap_or(false),
@@ -88,6 +91,7 @@ pub fn selector(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<Str
                 "seedream" => tl!("Doubao / Seedream"),
                 "flux" => "FLUX / Black Forest Labs",
                 "openai" => tl!("OpenAI-compatible / local server"),
+                "comfyui" => tl!("ComfyUI (local workflow)"),
                 _ => tl!("Codex (ChatGPT subscription)"),
             })
             .show_ui(ui, |ui| {
@@ -96,6 +100,7 @@ pub fn selector(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<Str
                 ui.selectable_value(&mut provider, "seedream".into(), tl!("Doubao / Seedream"));
                 ui.selectable_value(&mut provider, "flux".into(), "FLUX / Black Forest Labs");
                 ui.selectable_value(&mut provider, "openai".into(), tl!("OpenAI-compatible / local server"));
+                ui.selectable_value(&mut provider, "comfyui".into(), tl!("ComfyUI (local workflow)"));
             })
             .response
             .labelled_by(label.id);
@@ -122,6 +127,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::Seedream => "Seedream",
         Protocol::Flux => "FLUX (BFL)",
         Protocol::OpenAiImages => "OpenAI Images (edits)",
+        Protocol::ComfyUi => "ComfyUI workflow",
     }
 }
 
@@ -133,10 +139,18 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
         ui.label(tl!("Could not load API settings"));
         return;
     };
+    let comfy = profile.protocol == Protocol::ComfyUi;
     ui.horizontal(|ui| {
-        let label = ui.label(tl!("Model ID"));
+        let label = ui.label(if comfy { tl!("Workflow name") } else { tl!("Model ID") });
         ui.add(egui::TextEdit::singleline(&mut profile.model).id_salt(("ai-api-model", &provider)).desired_width(300.0).char_limit(200)).labelled_by(label.id);
     });
+    if comfy {
+        match &draft.workflow_dir {
+            Some(dir) => ui.weak(format!("{dir}/{}.json", profile.model)),
+            None => ui.weak(tl!("ComfyUI workflows need persistent AI settings")),
+        };
+        ui.weak(tl!("Export the workflow with Export (API) and put {{image}} in its Load Image node and {{prompt}} in its prompt text. {{seed}} is optional."));
+    }
     let open_field = format!("__aiApiSettingsOpen:{provider}");
     let open = fields.entry(open_field.clone()).or_insert_with(|| json!(!draft.has_key)).as_bool().unwrap_or(!draft.has_key);
     let mut save = false;
@@ -153,9 +167,14 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
                     craft_ui::ComboBox::from_id_salt("ai-api-protocol")
                         .selected_text(protocol_label(profile.protocol))
                         .show_ui(ui, |ui| {
-                            for protocol in
-                                [Protocol::GeminiInteractions, Protocol::GeminiGenerateContent, Protocol::Seedream, Protocol::Flux, Protocol::OpenAiImages]
-                            {
+                            for protocol in [
+                                Protocol::GeminiInteractions,
+                                Protocol::GeminiGenerateContent,
+                                Protocol::Seedream,
+                                Protocol::Flux,
+                                Protocol::OpenAiImages,
+                                Protocol::ComfyUi,
+                            ] {
                                 ui.selectable_value(&mut profile.protocol, protocol, protocol_label(protocol));
                             }
                         })
@@ -168,6 +187,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
                             Protocol::Seedream => "https://ark.cn-beijing.volces.com/api/v3/images/generations",
                             Protocol::Flux => "https://api.bfl.ai/v1/{model}",
                             Protocol::OpenAiImages => "https://api.openai.com/v1/images/edits",
+                            Protocol::ComfyUi => "http://127.0.0.1:8188",
                         }
                         .into();
                     }

@@ -59,6 +59,30 @@ For an address on `localhost`, `127.0.0.1` or `[::1]`, plain HTTP is allowed and
 the API key is optional: when none is saved, no `Authorization` header is sent.
 Remote addresses still require HTTPS and a key.
 
+### ComfyUI workflows
+
+Choose **ComfyUI (local workflow)** to edit with any model your ComfyUI runs
+(for example Qwen-Image-Edit or FLUX Kontext). The default address is
+`http://127.0.0.1:8188`, where ComfyUI and ComfyUI Desktop start; Desktop moves
+to the next free port when 8188 is taken, so use the address it shows.
+
+1. Build the edit workflow in ComfyUI and save it with **Export (API)**.
+2. In the exported JSON, set the Load Image node's `image` input to `"{{image}}"`
+   and the positive prompt text to `"{{prompt}}"`. Optionally set a sampler seed to
+   `"{{seed}}"` for a new seed on every edit. Placeholders must be whole string values.
+3. Save the file as `<name>.json` in the `comfyui-workflows` folder next to the AI
+   settings (the dialog shows the full path, on Linux usually
+   `~/.config/photocraft-ai/comfyui-workflows/`), and enter `<name>` as the
+   **Workflow name**. Saving the settings checks the file.
+
+PhotoCraft uploads the visible canvas (`/upload/image`), queues the workflow
+(`/prompt`), polls `/history` and downloads the single image saved by a Save Image
+node (a lone Preview Image also works). The workflow decides the output size; keep
+the canvas aspect ratio (for example with an Image Scale To Total Pixels node),
+because results more than 1% off are rejected. Cancelling removes a queued prompt;
+a prompt that has already started keeps running in ComfyUI and its result is
+discarded. The workflow file is read again for every edit.
+
 Codex 和豆包已在开发版中由用户实测；Gemini、FLUX 通过协议模拟测试，仍需真实账号验收。
 The OpenAI-compatible protocol is tested against local mock servers only.
 这属于 Beta：请保留文档备份。新版 AI 安装包从此项目下载，不使用官方安装包覆盖。
