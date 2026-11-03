@@ -45,7 +45,22 @@ with your own ChatGPT account. Alternatively configure your own supported image 
 Provider usage can incur charges. There is no automatic fallback to a paid API or automatic
 generation retry. No models, credentials, personal images or generated results are bundled.
 
+### OpenAI-compatible and local servers
+
+Choose **OpenAI-compatible / local server** to use the OpenAI Images API
+(`POST /v1/images/edits`, default model `gpt-image-2`) or any gateway or local
+server that speaks it. PhotoCraft sends a JSON body with the canvas as a PNG data
+URL in `images[0].image_url`, the instruction, `output_format: "png"` and a
+`size` with both edges divisible by 16 that matches the canvas aspect ratio
+(about 2.4 MP, at most 3840x2160). It expects one `data[].b64_json` image back.
+Canvases outside the 1:3 to 3:1 aspect ratio range are refused before any request.
+
+For an address on `localhost`, `127.0.0.1` or `[::1]`, plain HTTP is allowed and
+the API key is optional: when none is saved, no `Authorization` header is sent.
+Remote addresses still require HTTPS and a key.
+
 Codex 和豆包已在开发版中由用户实测；Gemini、FLUX 通过协议模拟测试，仍需真实账号验收。
+The OpenAI-compatible protocol is tested against local mock servers only.
 这属于 Beta：请保留文档备份。新版 AI 安装包从此项目下载，不使用官方安装包覆盖。
 
 ## 卸载、来源与许可证 / Uninstall and source

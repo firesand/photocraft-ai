@@ -10,11 +10,19 @@ pub struct ApiUi {
     saved: Option<Profile>,
     key: String,
     has_key: bool,
+    /// False for a saved local address, which may run without a key.
+    key_required: bool,
     persistent: bool,
     remember: bool,
     saved_remember: bool,
     message: Option<String>,
     message_error: bool,
+}
+
+impl ApiUi {
+    fn keyed(&self) -> bool {
+        self.has_key || !self.key_required
+    }
 }
 
 impl std::fmt::Debug for ApiUi {
@@ -30,7 +38,7 @@ pub fn selected(fields: &Map<String, Value>) -> &str {
 pub fn can_confirm(app: &PhotocraftApp, fields: &Map<String, Value>) -> bool {
     let draft = &app.ui.ai_api;
     draft.provider == selected(fields)
-        && draft.has_key
+        && draft.keyed()
         && draft.key.is_empty()
         && draft.profile.is_some()
         && draft.profile == draft.saved
@@ -47,6 +55,7 @@ fn apply(app: &mut PhotocraftApp, provider: &str, result: Result<Value, String>,
                 profile,
                 key: String::new(),
                 has_key: value.get("hasKey").and_then(Value::as_bool).unwrap_or(false),
+                key_required: value.get("keyRequired").and_then(Value::as_bool).unwrap_or(true),
                 persistent: value.get("persistentStorage").and_then(Value::as_bool).unwrap_or(false),
                 remember: value.get("rememberKey").and_then(Value::as_bool).unwrap_or(false),
                 saved_remember: value.get("rememberKey").and_then(Value::as_bool).unwrap_or(false),
@@ -78,6 +87,7 @@ pub fn selector(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<Str
                 "gemini" => "Gemini / Nano Banana",
                 "seedream" => tl!("Doubao / Seedream"),
                 "flux" => "FLUX / Black Forest Labs",
+                "openai" => tl!("OpenAI-compatible / local server"),
                 _ => tl!("Codex (ChatGPT subscription)"),
             })
             .show_ui(ui, |ui| {
@@ -85,6 +95,7 @@ pub fn selector(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<Str
                 ui.selectable_value(&mut provider, "gemini".into(), "Gemini / Nano Banana");
                 ui.selectable_value(&mut provider, "seedream".into(), tl!("Doubao / Seedream"));
                 ui.selectable_value(&mut provider, "flux".into(), "FLUX / Black Forest Labs");
+                ui.selectable_value(&mut provider, "openai".into(), tl!("OpenAI-compatible / local server"));
             })
             .response
             .labelled_by(label.id);
@@ -110,6 +121,7 @@ fn protocol_label(protocol: Protocol) -> &'static str {
         Protocol::GeminiGenerateContent => "Gemini generateContent",
         Protocol::Seedream => "Seedream",
         Protocol::Flux => "FLUX (BFL)",
+        Protocol::OpenAiImages => "OpenAI Images (edits)",
     }
 }
 
@@ -141,7 +153,9 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
                     craft_ui::ComboBox::from_id_salt("ai-api-protocol")
                         .selected_text(protocol_label(profile.protocol))
                         .show_ui(ui, |ui| {
-                            for protocol in [Protocol::GeminiInteractions, Protocol::GeminiGenerateContent, Protocol::Seedream, Protocol::Flux] {
+                            for protocol in
+                                [Protocol::GeminiInteractions, Protocol::GeminiGenerateContent, Protocol::Seedream, Protocol::Flux, Protocol::OpenAiImages]
+                            {
                                 ui.selectable_value(&mut profile.protocol, protocol, protocol_label(protocol));
                             }
                         })
@@ -153,13 +167,20 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
                             Protocol::GeminiGenerateContent => "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
                             Protocol::Seedream => "https://ark.cn-beijing.volces.com/api/v3/images/generations",
                             Protocol::Flux => "https://api.bfl.ai/v1/{model}",
+                            Protocol::OpenAiImages => "https://api.openai.com/v1/images/edits",
                         }
                         .into();
                     }
                 });
                 ui.weak(tl!("Custom services must support the selected image-editing protocol. Changing the address requires a key for that address."));
             });
-            let label = ui.label(if draft.has_key { tl!("API key configured — leave empty to keep it") } else { tl!("API key") });
+            let label = ui.label(if draft.has_key {
+                tl!("API key configured — leave empty to keep it")
+            } else if draft.key_required {
+                tl!("API key")
+            } else {
+                tl!("API key (optional for a local address)")
+            });
             ui.add(egui::TextEdit::singleline(&mut draft.key).id_salt(("ai-api-key", &provider)).password(true).desired_width(400.0).char_limit(4096))
                 .labelled_by(label.id);
             ui.add_enabled(draft.persistent, egui::Checkbox::new(&mut draft.remember, tl!("Remember API key in system credential store")));
@@ -182,7 +203,7 @@ pub fn body(app: &mut PhotocraftApp, ui: &mut egui::Ui, fields: &mut Map<String,
             ui.label(tl!(message.as_str()));
         }
     }
-    if draft.has_key && draft.profile == draft.saved && draft.key.is_empty() && draft.remember == draft.saved_remember {
+    if draft.keyed() && draft.profile == draft.saved && draft.key.is_empty() && draft.remember == draft.saved_remember {
         ui.weak(tl!("API configured. Saving settings does not generate an image."));
     } else {
         ui.weak(tl!("Save your API settings before editing."));

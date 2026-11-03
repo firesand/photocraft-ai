@@ -132,7 +132,7 @@ impl Settings {
     }
 
     pub fn profile(&self, provider: &str) -> Result<Profile, Error> {
-        self.profiles.get(provider).cloned().or_else(|| preset(provider)).ok_or_else(|| error("Choose Gemini, Seedream or FLUX"))
+        self.profiles.get(provider).cloned().or_else(|| preset(provider)).ok_or_else(|| error("Choose Gemini, Seedream, FLUX or OpenAI-compatible"))
     }
 
     fn account(&self, provider: &str, profile: &Profile) -> String {
@@ -166,7 +166,7 @@ impl Settings {
 
     pub fn save(&mut self, provider: &str, profile: Profile, new_key: Option<&str>, remember: bool) -> Result<(), Error> {
         if !PROVIDERS.contains(&provider) {
-            return Err(error("Choose Gemini, Seedream or FLUX"));
+            return Err(error("Choose Gemini, Seedream, FLUX or OpenAI-compatible"));
         }
         profile.validate()?;
         if let Some(key) = new_key {
@@ -174,11 +174,16 @@ impl Settings {
         }
         let old = self.profile(provider)?;
         let account = self.account(provider, &profile);
+        // A local address may run without a key; an empty key is never stored.
         let key = match new_key {
             Some(key) => key.to_owned(),
-            None => self.key(provider, &profile)?.ok_or_else(|| error("Enter an API key for this address before saving"))?,
+            None => match self.key(provider, &profile)? {
+                Some(key) => key,
+                None if profile.is_local() => String::new(),
+                None => return Err(error("Enter an API key for this address before saving")),
+            },
         };
-        if remember {
+        if remember && !key.is_empty() {
             let store = self.secrets.as_ref().ok_or_else(|| error("Persistent credential storage is unavailable. Turn off Remember API key."))?;
             store.set(&account, Some(&key))?;
         }
@@ -211,7 +216,9 @@ impl Settings {
             }
             return Err(e);
         }
-        self.keys.insert(account, key);
+        if !key.is_empty() {
+            self.keys.insert(account, key);
+        }
         // Never carry the old key in memory to a different address.
         if old.endpoint != profile.endpoint || old.protocol != profile.protocol {
             self.keys.remove(&self.account(provider, &old));
@@ -230,9 +237,18 @@ impl Settings {
         Ok(())
     }
 
+    /// Whether editing needs a configured key: local addresses can run without one.
+    pub fn key_required(&self, provider: &str) -> Result<bool, Error> {
+        Ok(!self.profile(provider)?.is_local())
+    }
+
     pub fn provider(&self, provider: &str) -> Result<ApiProvider, Error> {
         let profile = self.profile(provider)?;
-        let key = self.key(provider, &profile)?.ok_or_else(|| error("Configure an API key for the selected service first"))?;
+        let key = match self.key(provider, &profile)? {
+            Some(key) => key,
+            None if profile.is_local() => String::new(),
+            None => return Err(error("Configure an API key for the selected service first")),
+        };
         ApiProvider::new(profile, key)
     }
 

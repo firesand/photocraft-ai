@@ -58,13 +58,13 @@ fn server(status: u16, body: String, pause: bool) -> (String, std::thread::JoinH
 
 #[test]
 fn all_protocols_send_canvas_prompt_and_exactly_one_request() {
-    for protocol in [Protocol::GeminiInteractions, Protocol::GeminiGenerateContent, Protocol::Seedream] {
+    for protocol in [Protocol::GeminiInteractions, Protocol::GeminiGenerateContent, Protocol::Seedream, Protocol::OpenAiImages] {
         let image = png();
         let data = STANDARD.encode(&image);
         let response = match protocol {
             Protocol::GeminiInteractions => json!({"status":"completed","steps":[{"type":"model_output","content":[{"type":"image","data":data}]}]}),
             Protocol::GeminiGenerateContent => json!({"candidates":[{"finishReason":"STOP","content":{"parts":[{"inlineData":{"data":data}}]}}]}),
-            Protocol::Seedream => json!({"data":[{"b64_json":data}]}),
+            Protocol::Seedream | Protocol::OpenAiImages => json!({"data":[{"b64_json":data}]}),
             Protocol::Flux => Value::Null, // The asynchronous workflow has separate tests.
         };
         let (mut endpoint, thread, _) = server(200, response.to_string(), false);
@@ -88,12 +88,68 @@ fn all_protocols_send_canvas_prompt_and_exactly_one_request() {
             assert!(header.to_ascii_lowercase().contains("authorization: bearer secret-test-key"));
             assert_eq!(body["size"], "2309x1732");
             assert!(body.get("stream").is_none(), "the synchronous request omits model-dependent stream options");
+        } else if protocol == Protocol::OpenAiImages {
+            assert!(header.to_ascii_lowercase().contains("authorization: bearer secret-test-key"));
+            assert_eq!(body["model"], "test-image");
+            assert_eq!(body["images"][0]["image_url"], format!("data:image/png;base64,{data}"));
+            assert_eq!(body["size"], "1728x1296", "a multiple-of-16 size with the canvas's 4:3 ratio");
+            assert_eq!(body["output_format"], "png");
+            assert!(body.get("response_format").is_none(), "GPT image models reject response_format");
         } else {
             assert!(header.to_ascii_lowercase().contains("x-goog-api-key: secret-test-key"));
             if protocol == Protocol::GeminiInteractions {
                 assert_eq!(body["response_format"]["aspect_ratio"], "4:3");
             } else {
                 assert_eq!(body["generationConfig"]["imageConfig"]["aspectRatio"], "4:3");
+            }
+        }
+    }
+}
+
+#[test]
+fn local_server_runs_without_a_key_and_receives_no_credential_header() {
+    let image = png();
+    let (endpoint, thread, _) = server(200, json!({"data":[{"b64_json":STANDARD.encode(&image)}]}).to_string(), false);
+    let provider = ApiProvider::new(Profile { endpoint, ..preset("openai").unwrap() }, String::new()).unwrap();
+    let work = tempfile::tempdir().unwrap();
+    let input = work.path().join("canvas.png");
+    std::fs::write(&input, &image).unwrap();
+    let result = provider.edit(&EditRequest { image: &input, prompt: "edit", workspace: work.path() }, &|| false).unwrap();
+    assert_eq!(std::fs::read(result.saved_path).unwrap(), image);
+    let request = thread.join().unwrap();
+    let (header, _) = request.split_once("\r\n\r\n").unwrap();
+    assert!(!header.to_ascii_lowercase().contains("authorization"));
+}
+
+#[test]
+fn remote_addresses_still_require_a_key() {
+    for provider in ["openai", "gemini", "seedream", "flux"] {
+        let profile = preset(provider).unwrap();
+        assert!(!profile.is_local(), "{provider}");
+        assert!(ApiProvider::new(profile, String::new()).is_err(), "{provider}");
+    }
+    for endpoint in ["http://localhost:8188/v1/images/edits", "http://127.0.0.1/v1/images/edits", "http://[::1]:7860/v1/images/edits"] {
+        assert!(Profile { endpoint: endpoint.into(), ..preset("openai").unwrap() }.is_local(), "{endpoint}");
+    }
+    // A loopback-looking name elsewhere in the URL does not make the host local.
+    assert!(!Profile { endpoint: "https://localhost.example.com/v1/images/edits".into(), ..preset("openai").unwrap() }.is_local());
+}
+
+#[test]
+fn openai_sizes_match_the_canvas_aspect_within_api_limits() {
+    let in_range = |width: u32, height: u32| (1.0 / 3.0..=3.0).contains(&(f64::from(width) / f64::from(height)));
+    for width in (64..=8192).step_by(37) {
+        for height in (64..=8192).step_by(41) {
+            match openai_size(width, height) {
+                Ok((w, h)) => {
+                    assert!(in_range(width, height), "{width}x{height}");
+                    assert_eq!((w % 16, h % 16), (0, 0), "{width}x{height} -> {w}x{h}");
+                    assert!(w.max(h) <= 3840 && w.min(h) <= 2160, "{width}x{height} -> {w}x{h}");
+                    let skew = (f64::from(w) * f64::from(height) / (f64::from(h) * f64::from(width)) - 1.0).abs();
+                    // The engine accepts results within 1% of the canvas aspect ratio.
+                    assert!(skew <= 0.005, "{width}x{height} -> {w}x{h}: {skew}");
+                }
+                Err(_) => assert!(!in_range(width, height), "{width}x{height} is in range but got no size"),
             }
         }
     }

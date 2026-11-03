@@ -52,6 +52,12 @@ impl Profile {
     fn request_url(&self) -> String {
         self.endpoint.replace("{model}", &self.model)
     }
+
+    /// A loopback address, where plain HTTP is allowed and the API key is optional: local
+    /// servers often run without authentication.
+    pub fn is_local(&self) -> bool {
+        url::Url::parse(&self.request_url()).is_ok_and(|url| matches!(url.host_str(), Some("localhost" | "127.0.0.1" | "[::1]")))
+    }
 }
 
 pub fn validate_key(key: &str) -> Result<(), Error> {
@@ -68,9 +74,12 @@ pub struct ApiProvider {
 }
 
 impl ApiProvider {
+    /// An empty key is accepted only for a local address; no authentication header is sent then.
     pub fn new(profile: Profile, key: String) -> Result<Self, Error> {
         profile.validate()?;
-        validate_key(&key)?;
+        if !(key.is_empty() && profile.is_local()) {
+            validate_key(&key)?;
+        }
         Ok(Self { profile, key, timeout: Duration::from_secs(600) })
     }
 
@@ -83,17 +92,18 @@ impl ApiProvider {
             .user_agent("Photocraft-dev")
             .build()
             .map_err(|_| error("Could not initialize the image API client"))?;
-        let mut auth = reqwest::header::HeaderValue::from_str(&match self.profile.protocol {
-            Protocol::Seedream => format!("Bearer {}", self.key),
-            _ => self.key.clone(),
-        })
-        .map_err(|_| error("Invalid API key"))?;
+        let bearer = matches!(self.profile.protocol, Protocol::Seedream | Protocol::OpenAiImages);
+        let mut auth = reqwest::header::HeaderValue::from_str(&if bearer { format!("Bearer {}", self.key) } else { self.key.clone() })
+            .map_err(|_| error("Invalid API key"))?;
         auth.set_sensitive(true);
         if self.profile.protocol == Protocol::Flux {
             return tokio::time::timeout(self.timeout, flux::edit(self, &client, body, auth)).await.map_err(|_| Error::Timeout)?;
         }
-        let header = if self.profile.protocol == Protocol::Seedream { "authorization" } else { "x-goog-api-key" };
-        let mut response = client.post(self.profile.request_url()).header(header, auth).json(&body).send().await.map_err(network_error)?;
+        let mut request = client.post(self.profile.request_url()).json(&body);
+        if !self.key.is_empty() {
+            request = request.header(if bearer { "authorization" } else { "x-goog-api-key" }, auth);
+        }
+        let mut response = request.send().await.map_err(network_error)?;
         if !response.status().is_success() {
             return Err(rejection::http(response, self.profile.protocol).await);
         }
@@ -209,15 +219,41 @@ fn request_body(profile: &Profile, prompt: &str, input: &[u8], width: u32, heigh
                 // option, so omit it rather than sending a field for other model versions.
                 "size":format!("{w}x{h}"),"response_format":"b64_json"})
         }
+        Protocol::OpenAiImages => {
+            let (w, h) = openai_size(width, height)?;
+            // GPT image models return b64_json by default and reject response_format.
+            json!({"model":profile.model,"prompt":prompt,"images":[{"image_url":format!("data:image/png;base64,{encoded}")}],
+                "size":format!("{w}x{h}"),"output_format":"png","n":1})
+        }
     };
     if let Some(ratio) = standard_aspect(width, height) {
         match profile.protocol {
             Protocol::GeminiInteractions => body["response_format"]["aspect_ratio"] = json!(ratio),
             Protocol::GeminiGenerateContent => body["generationConfig"]["imageConfig"] = json!({"aspectRatio":ratio}),
-            Protocol::Seedream | Protocol::Flux => {}
+            Protocol::Seedream | Protocol::Flux | Protocol::OpenAiImages => {}
         }
     }
     Ok(body)
+}
+
+/// The gpt-image-2 family takes any size whose edges are multiples of 16, with an aspect ratio
+/// from 1:3 to 3:1, up to 3840x2160. Aim for about 2.4 MP and take the multiple-of-16 pair closest
+/// to the canvas ratio: the engine accepts a result only within 1% of the canvas aspect ratio, so
+/// fail here rather than after a billed request.
+fn openai_size(width: u32, height: u32) -> Result<(u32, u32), Error> {
+    let ratio = f64::from(width) / f64::from(height);
+    if !(1.0 / 3.0..=3.0).contains(&ratio) {
+        return Err(error("OpenAI-compatible image editing requires a canvas aspect ratio between 1:3 and 3:1"));
+    }
+    let skew = |(w, h): (u32, u32)| (f64::from(w) * f64::from(height) / (f64::from(h) * f64::from(width)) - 1.0).abs();
+    // Candidate heights in 16-pixel rows around the target; each width is rounded to the ratio.
+    let rows = ((1536.0 * 1536.0 / ratio).sqrt() / 16.0).round() as u32;
+    (rows.saturating_sub(4).max(1)..=rows + 4)
+        .map(|n| (((f64::from(n) * ratio).round() as u32).max(1) * 16, n * 16))
+        .filter(|&(w, h)| w.max(h) <= 3840 && w.min(h) <= 2160)
+        .min_by(|a, b| skew(*a).total_cmp(&skew(*b)))
+        .filter(|&size| skew(size) <= 0.005)
+        .ok_or_else(|| error("Could not choose an output size matching the canvas aspect ratio"))
 }
 
 fn standard_aspect(width: u32, height: u32) -> Option<&'static str> {
@@ -252,7 +288,7 @@ fn parse_result(protocol: Protocol, value: &Value) -> Result<Vec<u8>, Error> {
     }
     let images = match protocol {
         Protocol::Flux => return Err(error("FLUX requires its asynchronous result workflow")),
-        Protocol::Seedream => seedream_images(value)?,
+        Protocol::Seedream | Protocol::OpenAiImages => data_images(value)?,
         Protocol::GeminiGenerateContent => candidate_images(value)?,
         Protocol::GeminiInteractions => interaction_images(value)?,
     };
@@ -268,7 +304,8 @@ fn array<'a>(value: &'a Value, field: &str) -> impl Iterator<Item = &'a Value> {
     value.get(field).and_then(Value::as_array).into_iter().flatten()
 }
 
-fn seedream_images(value: &Value) -> Result<Vec<&str>, Error> {
+/// Seedream and the OpenAI Images API both return `data[].b64_json`.
+fn data_images(value: &Value) -> Result<Vec<&str>, Error> {
     if array(value, "data").any(|item| item.get("error").is_some_and(|e| !e.is_null())) {
         if let Some(detail) = array(value, "data").find_map(rejection::detail) {
             return Err(error(&format!("Image service reported a failed image. {detail}. No layer was added.")));

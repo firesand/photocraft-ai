@@ -16,7 +16,7 @@ pub fn open_settings(path: std::path::PathBuf) -> Result<photocraft_gen::api_set
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     #[cfg(not(target_arch = "wasm32"))]
     {
-        let bad = || EngineError::BadParams { cmd: COMMAND.into(), msg: "Specify action get|save|removeKey and provider gemini|seedream|flux".into() };
+        let bad = || EngineError::BadParams { cmd: COMMAND.into(), msg: "Specify action get|save|removeKey and provider gemini|seedream|flux|openai".into() };
         let action = p.get("action").and_then(Value::as_str).ok_or_else(bad)?;
         let provider = p.get("provider").and_then(Value::as_str).filter(|s| photocraft_gen::api_config::PROVIDERS.contains(s)).ok_or_else(bad)?;
         let fail = |e: photocraft_gen::Error| EngineError::Other(e.to_string());
@@ -41,9 +41,10 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(yes) => (yes, None),
             Err(e) => (false, Some(e.to_string())),
         };
-        Ok(
-            json!({"profile":s.ai_api.profile(provider).map_err(fail)?,"hasKey":has_key,"rememberKey":s.ai_api.remembered(provider),"persistentStorage":s.ai_api.persistent(),"credentialError":credential_error}),
-        )
+        Ok(json!({
+            "profile":s.ai_api.profile(provider).map_err(fail)?,"hasKey":has_key,"keyRequired":s.ai_api.key_required(provider).map_err(fail)?,
+            "rememberKey":s.ai_api.remembered(provider),"persistentStorage":s.ai_api.persistent(),"credentialError":credential_error
+        }))
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -58,7 +59,7 @@ pub fn specs() -> Vec<CommandSpec> {
         label: "AI Provider Settings",
         menu: &[],
         shortcut: None,
-        params: r#"{"action":"get|save|removeKey","provider":"gemini|seedream|flux","profile":{protocol,endpoint,model}?,"apiKey":secret?,"rememberKey":bool?}; local settings only, no network; never returns secrets"#,
+        params: r#"{"action":"get|save|removeKey","provider":"gemini|seedream|flux|openai","profile":{protocol,endpoint,model}?,"apiKey":secret?,"rememberKey":bool?}; local settings only, no network; never returns secrets"#,
         enabled: |_| if cfg!(target_arch = "wasm32") { Err("API image editing requires the desktop app".into()) } else { Ok(()) },
         run,
         journal: false,

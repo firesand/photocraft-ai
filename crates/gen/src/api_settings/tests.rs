@@ -42,6 +42,26 @@ fn remembered_key_survives_restart_only_in_vault_and_is_bound_to_address() {
 }
 
 #[test]
+fn local_address_saves_and_edits_without_a_key_but_remote_does_not() {
+    let work = tempfile::tempdir().unwrap();
+    let path = work.path().join("settings.json");
+    let vault = Arc::new(Vault::default());
+    let mut settings = Settings::with_store(path.clone(), "local".into(), vault.clone()).unwrap();
+    let remote = preset("openai").unwrap();
+    assert!(settings.key_required("openai").unwrap());
+    assert!(settings.save("openai", remote.clone(), None, true).is_err());
+    let local = Profile { endpoint: "http://127.0.0.1:7860/v1/images/edits".into(), model: "qwen-image-edit".into(), ..remote };
+    settings.save("openai", local.clone(), None, true).unwrap();
+    assert!(!settings.key_required("openai").unwrap());
+    assert!(!settings.has_key("openai").unwrap());
+    assert!(settings.provider("openai").is_ok());
+    assert!(vault.0.lock().unwrap().is_empty(), "an empty key is never stored");
+    let restarted = Settings::with_store(path, "local".into(), vault).unwrap();
+    assert_eq!(restarted.profile("openai").unwrap(), local);
+    assert!(restarted.provider("openai").is_ok());
+}
+
+#[test]
 fn session_key_is_not_persisted_and_model_change_can_keep_same_key() {
     let work = tempfile::tempdir().unwrap();
     let path = work.path().join("settings.json");
